@@ -23,6 +23,13 @@ from headroom.proxy.savings_tracker import HEADROOM_SAVINGS_PATH_ENV_VAR, Saving
 from headroom.proxy.server import ProxyConfig, create_app
 
 
+@pytest.fixture(autouse=True)
+def _isolate_savings_event_ledger(monkeypatch, tmp_path) -> None:
+    """Keep proxy-history tests from writing to the developer's real MCP ledger."""
+
+    monkeypatch.setenv("HEADROOM_SAVINGS_EVENTS_PATH", str(tmp_path / "savings_events.jsonl"))
+
+
 def _record_request(
     client: TestClient,
     *,
