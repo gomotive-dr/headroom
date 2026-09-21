@@ -108,6 +108,45 @@ def test_merge_mcp_lifetime_adds_only_mcp_ledger_events(monkeypatch, tmp_path):
     assert merged["mcp_tokens_saved"] == 300
 
 
+def test_merge_mcp_lifetime_response_updates_nested_dashboard_totals(monkeypatch, tmp_path):
+    _events_env(monkeypatch, tmp_path)
+    L.record_savings_event(
+        tokens_before=1000,
+        tokens_after=600,
+        source="proxy",
+        cost_usd=0.04,
+    )
+    L.record_savings_event(
+        tokens_before=500,
+        tokens_after=200,
+        source="mcp",
+        client="cursor-vscode",
+        cost_usd=0.03,
+    )
+
+    merged = L.merge_mcp_lifetime_response(
+        {
+            "tokens": {"saved": 400, "attempted_input": 1000},
+            "cost": {"compression_savings_usd": 0.04},
+            "requests": {"total": 1, "failed": 0},
+        }
+    )
+
+    assert merged["tokens"] == {
+        "saved": 700,
+        "attempted_input": 1500,
+        "token_savings_percent": pytest.approx(46.67),
+    }
+    assert merged["cost"]["compression_savings_usd"] == pytest.approx(0.07)
+    assert merged["requests"] == {"total": 2, "failed": 0}
+    assert merged["mcp"] == {
+        "calls": 1,
+        "tokens_saved": 300,
+        "tokens_before": 500,
+        "cost_usd": pytest.approx(0.03),
+    }
+
+
 def test_windows_today_week_last30(monkeypatch, tmp_path):
     _events_env(monkeypatch, tmp_path)
     now = datetime(2026, 6, 17, 12, 0, tzinfo=UTC)

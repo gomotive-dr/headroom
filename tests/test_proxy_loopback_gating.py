@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from headroom import savings_ledger
 from headroom.cache.backends import InMemoryBackend
 from headroom.cache.compression_feedback import CompressionHints
 from headroom.cache.compression_store import get_compression_store, reset_compression_store
@@ -257,7 +258,9 @@ def test_feedback_tool_detail_excludes_agent_query_text(monkeypatch: pytest.Monk
 # CCR data endpoints — cached session content, gated to 404 off-loopback (#1227).
 def test_stats_lifetime_route_uses_dashboard_metadata_access_policy(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
 ) -> None:
+    monkeypatch.setenv("HEADROOM_SAVINGS_EVENTS_PATH", str(tmp_path / "savings_events.jsonl"))
     monkeypatch.setenv(
         "HEADROOM_PROXY_TRUSTED_DASHBOARD_CLIENT_CIDRS",
         "100.90.0.5/32",
@@ -295,7 +298,11 @@ def test_stats_lifetime_route_uses_dashboard_metadata_access_policy(
         client=("127.0.0.1", 12345),
     ).get("/stats-lifetime")
     assert loopback.status_code == 200, loopback.text
-    assert loopback.json() == expected
+    loopback_payload = loopback.json()
+    assert loopback_payload["requests"] == expected["requests"]
+    assert loopback_payload["projects"] == expected["projects"]
+    assert loopback_payload["persistence"] == expected["persistence"]
+    assert loopback_payload["ledger"]["lifetime"]["tokens_saved"] == 0
 
     trusted_dashboard = TestClient(
         app,
@@ -303,7 +310,29 @@ def test_stats_lifetime_route_uses_dashboard_metadata_access_policy(
         client=("100.90.0.5", 12345),
     ).get("/stats-lifetime")
     assert trusted_dashboard.status_code == 200, trusted_dashboard.text
-    assert trusted_dashboard.json() == expected
+    assert trusted_dashboard.json() == loopback_payload
+
+
+def test_stats_lifetime_includes_mcp_ledger_savings(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("HEADROOM_SAVINGS_EVENTS_PATH", str(tmp_path / "savings_events.jsonl"))
+    savings_ledger.record_savings_event(
+        tokens_before=1000,
+        tokens_after=600,
+        client="cursor-vscode",
+        source="mcp",
+        cost_usd=0.04,
+    )
+
+    response = _loopback_client().get("/stats-lifetime")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["tokens"]["saved"] == 400
+    assert payload["tokens"]["attempted_input"] == 1000
+    assert payload["requests"]["total"] == 1
+    assert payload["cost"]["compression_savings_usd"] == pytest.approx(0.04)
+    assert payload["ledger"]["by_client"][0]["client"] == "cursor-vscode"
+    assert payload["ledger"]["by_source"][0]["source"] == "mcp"
 
 
 CCR_GATED = [

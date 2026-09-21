@@ -4432,9 +4432,11 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         cache_net_usd = prefix_cache_stats.get("totals", {}).get("net_savings_usd", 0.0)
         total_tokens_all_layers = all_layers_tokens_saved
         persistent_savings = m.savings_tracker.stats_preview()
+        ledger_report = savings_ledger.aggregate_savings()
         persistent_savings["lifetime"] = savings_ledger.merge_mcp_lifetime(
-            persistent_savings.get("lifetime")
+            persistent_savings.get("lifetime"), ledger_report
         )
+        persistent_savings["ledger"] = ledger_report.to_dict()
         display_session = persistent_savings.get("display_session", {})
         recent_request_logs = proxy.logger.get_recent(10_000) if proxy.logger else []
         recent_request_payload = _build_recent_request_payload()
@@ -4914,13 +4916,20 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
     @app.get("/stats-lifetime")
     async def stats_lifetime(request: Request):
         """Return persisted lifetime aggregates with sensitive fields gated."""
-        payload = dict(proxy.metrics.savings_tracker.lifetime_response())
+        ledger_report = savings_ledger.aggregate_savings()
+        payload = savings_ledger.merge_mcp_lifetime_response(
+            proxy.metrics.savings_tracker.lifetime_response(),
+            ledger_report,
+        )
         include_sensitive = _request_can_view_dashboard_metadata(
             request,
             trusted_dashboard_client_cidrs,
         )
+        if include_sensitive:
+            payload["ledger"] = ledger_report.to_dict()
         if not include_sensitive:
             payload.pop("projects", None)
+            payload.pop("ledger", None)
             persistence = payload.get("persistence")
             if isinstance(persistence, dict):
                 payload["persistence"] = {**persistence, "error": None}
@@ -4955,7 +4964,13 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
                 headers={"Content-Disposition": f'attachment; filename="{filename}"'},
             )
 
-        return proxy.metrics.savings_tracker.history_response(history_mode=history_mode)
+        payload = proxy.metrics.savings_tracker.history_response(history_mode=history_mode)
+        ledger_report = savings_ledger.aggregate_savings()
+        payload["lifetime"] = savings_ledger.merge_mcp_lifetime(
+            payload.get("lifetime"), ledger_report
+        )
+        payload["ledger"] = ledger_report.to_dict()
+        return payload
 
     @app.get("/transformations/feed", dependencies=[Depends(_require_loopback)])
     async def transformations_feed(limit: int = 20):

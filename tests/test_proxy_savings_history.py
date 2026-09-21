@@ -1068,6 +1068,7 @@ def test_stats_history_defaults_to_compact_history_but_can_return_full_history(
 def test_stats_history_persists_across_restarts_and_stats_stays_compatible(tmp_path, monkeypatch):
     savings_path = tmp_path / "proxy_savings.json"
     monkeypatch.setenv("HEADROOM_SAVINGS_PATH", str(savings_path))
+    monkeypatch.setenv("HEADROOM_SAVINGS_EVENTS_PATH", str(tmp_path / "savings_events.jsonl"))
     monkeypatch.setattr(
         "headroom.proxy.server.CostTracker._get_cache_prices",
         # **kwargs so the stub keeps standing in for the real method as its
@@ -1312,6 +1313,7 @@ def test_malformed_savings_state_is_ignored_safely(tmp_path, monkeypatch):
     savings_path = tmp_path / "proxy_savings.json"
     savings_path.write_text("{not valid json", encoding="utf-8")
     monkeypatch.setenv("HEADROOM_SAVINGS_PATH", str(savings_path))
+    monkeypatch.setenv("HEADROOM_SAVINGS_EVENTS_PATH", str(tmp_path / "savings_events.jsonl"))
 
     config = ProxyConfig(
         cache_enabled=False,
@@ -1343,6 +1345,9 @@ def test_dashboard_includes_history_toggle_and_endpoint(tmp_path, monkeypatch):
         html = response.text
         assert "Session" in html
         assert "Historical" in html
+        assert "Savings by Client" in html
+        assert "Savings by Source" in html
+        assert "Proxy + MCP compression" in html
         assert "fetch('/stats-history')" in html
         assert "Export CSV" in html
         assert "Weekly Savings" in html

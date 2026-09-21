@@ -1481,6 +1481,27 @@
                     <section class="bg-surface rounded-lg p-4 border border-border"><h3 class="mb-3 text-sm text-gray-300">Prefix Cache</h3><dl class="space-y-2 text-sm"><div class="flex justify-between"><dt>Hits / requests</dt><dd x-text="formatNumber(lifetimeStats.prefix_cache?.hit_requests || 0) + ' / ' + formatNumber(lifetimeStats.prefix_cache?.requests || 0)"></dd></div><div class="flex justify-between"><dt>Hit rate</dt><dd x-text="lifetimeStats.prefix_cache?.cache_hit_rate == null ? '—' : lifetimeStats.prefix_cache.cache_hit_rate.toFixed(1) + '%'"></dd></div><div class="flex justify-between"><dt>Read / write</dt><dd x-text="formatNumber(lifetimeStats.prefix_cache?.cache_read_tokens || 0) + ' / ' + formatNumber(lifetimeStats.prefix_cache?.cache_write_tokens || 0)"></dd></div><div class="flex justify-between"><dt>TTL 1h / 5m</dt><dd x-text="(lifetimeStats.prefix_cache?.ttl_1h_percent == null ? '—' : lifetimeStats.prefix_cache.ttl_1h_percent.toFixed(0) + '%') + ' / ' + (lifetimeStats.prefix_cache?.ttl_5m_percent == null ? '—' : lifetimeStats.prefix_cache.ttl_5m_percent.toFixed(0) + '%')"></dd></div><div class="flex justify-between"><dt>Cache bust</dt><dd x-text="formatNumber(lifetimeStats.prefix_cache?.bust_count || 0) + ' / ' + formatNumber(lifetimeStats.prefix_cache?.bust_tokens || 0)"></dd></div></dl></section>
                 </div>
 
+                <div class="grid grid-cols-1 gap-4 mb-6 lg:grid-cols-3">
+                    <section class="bg-surface rounded-lg p-4 border border-border">
+                        <h3 class="mb-3 text-sm text-gray-300">Savings Windows</h3>
+                        <template x-for="[name, metric] in Object.entries(lifetimeStats.ledger?.windows || {})" :key="name">
+                            <div class="flex justify-between text-sm"><span x-text="name.replaceAll('_', ' ')"></span><span class="text-emerald-400" x-text="formatNumber(metric.tokens_saved || 0) + ' tokens'"></span></div>
+                        </template>
+                    </section>
+                    <section class="bg-surface rounded-lg p-4 border border-border">
+                        <h3 class="mb-3 text-sm text-gray-300">Savings by Client</h3>
+                        <template x-for="metric in (lifetimeStats.ledger?.by_client || [])" :key="metric.client">
+                            <div class="flex justify-between text-sm"><span x-text="metric.client"></span><span x-text="formatNumber(metric.calls || 0) + ' calls · ' + formatNumber(metric.tokens_saved || 0)"></span></div>
+                        </template>
+                    </section>
+                    <section class="bg-surface rounded-lg p-4 border border-border">
+                        <h3 class="mb-3 text-sm text-gray-300">Savings by Source</h3>
+                        <template x-for="metric in (lifetimeStats.ledger?.by_source || [])" :key="metric.source">
+                            <div class="flex justify-between text-sm"><span x-text="metric.source"></span><span x-text="formatNumber(metric.calls || 0) + ' calls · ' + formatNumber(metric.tokens_saved || 0)"></span></div>
+                        </template>
+                    </section>
+                </div>
+
                 <div class="grid grid-cols-1 gap-4 lg:grid-cols-2">
                     <section class="bg-surface rounded-lg p-4 border border-border"><h3 class="mb-3 text-sm text-gray-300">Cache Miss Attribution</h3><template x-for="[name, count] in Object.entries(lifetimeStats.prefix_cache?.misses_by_reason || {})" :key="name"><div class="flex justify-between text-sm"><span x-text="name"></span><span x-text="formatNumber(count)"></span></div></template></section>
                     <section class="bg-surface rounded-lg p-4 border border-border"><h3 class="mb-3 text-sm text-gray-300">Waste Signals</h3><template x-for="[name, count] in Object.entries(lifetimeStats.waste_signals || {})" :key="name"><div class="flex justify-between text-sm"><span x-text="name"></span><span x-text="formatNumber(count)"></span></div></template></section>
@@ -1570,7 +1591,7 @@
             <div>
                 <div class="flex flex-col gap-4 mb-6 lg:flex-row lg:items-center lg:justify-between">
                     <div>
-                        <div class="text-sm font-medium text-gray-300">Historical Proxy Compression</div>
+                        <div class="text-sm font-medium text-gray-300">Historical Compression</div>
                         <div class="text-xs text-gray-500">
                             Durable local savings history from <span class="font-mono">/stats-history</span>
                         </div>
@@ -1597,7 +1618,7 @@
                                   x-text="'$' + formatCurrency(historyStats.lifetime?.compression_savings_usd || 0)"></span>
                         </div>
                         <div class="mt-2 text-xs text-gray-500">
-                            Proxy compression only
+                            Proxy + MCP compression
                         </div>
                     </div>
 

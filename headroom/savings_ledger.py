@@ -395,6 +395,52 @@ def merge_mcp_lifetime(
     return merged
 
 
+def merge_mcp_lifetime_response(
+    proxy_response: dict[str, Any] | None,
+    report: SavingsReport | None = None,
+) -> dict[str, Any]:
+    """Merge MCP ledger totals into the nested ``/stats-lifetime`` payload."""
+
+    merged = dict(proxy_response or {})
+    report = report or aggregate_savings()
+    mcp = next((row for row in report.by_source if row.get("source") == "mcp"), None)
+    if not mcp:
+        return merged
+
+    mcp_tokens = int(mcp.get("tokens_saved", 0) or 0)
+    mcp_before = int(mcp.get("tokens_before", 0) or 0)
+    mcp_cost = float(mcp.get("cost_usd", 0.0) or 0.0)
+    mcp_calls = int(mcp.get("calls", 0) or 0)
+
+    tokens = dict(merged.get("tokens") or {})
+    tokens["saved"] = int(tokens.get("saved", 0) or 0) + mcp_tokens
+    tokens["attempted_input"] = int(tokens.get("attempted_input", 0) or 0) + mcp_before
+    tokens["token_savings_percent"] = (
+        round(tokens["saved"] / tokens["attempted_input"] * 100, 2)
+        if tokens["attempted_input"] > 0
+        else None
+    )
+    merged["tokens"] = tokens
+
+    cost = dict(merged.get("cost") or {})
+    cost["compression_savings_usd"] = round(
+        float(cost.get("compression_savings_usd", 0.0) or 0.0) + mcp_cost,
+        6,
+    )
+    merged["cost"] = cost
+
+    requests = dict(merged.get("requests") or {})
+    requests["total"] = int(requests.get("total", 0) or 0) + mcp_calls
+    merged["requests"] = requests
+    merged["mcp"] = {
+        "calls": mcp_calls,
+        "tokens_saved": mcp_tokens,
+        "tokens_before": mcp_before,
+        "cost_usd": round(mcp_cost, 6),
+    }
+    return merged
+
+
 def _maybe_compact(target: Path) -> None:
     """Rewrite the ledger dropping out-of-retention events once it grows large."""
 
@@ -446,4 +492,5 @@ __all__ = [
     "record_savings_event",
     "aggregate_savings",
     "merge_mcp_lifetime",
+    "merge_mcp_lifetime_response",
 ]
