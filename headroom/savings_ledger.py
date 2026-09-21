@@ -262,6 +262,7 @@ class SavingsReport:
     windows: dict[str, dict[str, Any]]
     by_model: list[dict[str, Any]]
     by_client: list[dict[str, Any]]
+    by_source: list[dict[str, Any]]
     top_model: str = UNKNOWN
 
     def to_dict(self) -> dict[str, Any]:
@@ -273,6 +274,7 @@ class SavingsReport:
             "windows": self.windows,
             "by_model": self.by_model,
             "by_client": self.by_client,
+            "by_source": self.by_source,
         }
 
 
@@ -312,6 +314,7 @@ def aggregate_savings(
     last_7 = _Bucket()
     by_model: dict[str, _Bucket] = {}
     by_client: dict[str, _Bucket] = {}
+    by_source: dict[str, _Bucket] = {}
 
     for event in events:
         ts: datetime = event["_ts"]
@@ -334,6 +337,9 @@ def aggregate_savings(
         by_client.setdefault(str(event.get("client") or UNKNOWN), _Bucket()).add(
             saved=saved, before=before, cost=cost
         )
+        by_source.setdefault(str(event.get("source") or UNKNOWN), _Bucket()).add(
+            saved=saved, before=before, cost=cost
+        )
 
     model_rows = _ranked(by_model, "model")
     top_model = model_rows[0]["model"] if model_rows else UNKNOWN
@@ -349,8 +355,44 @@ def aggregate_savings(
         },
         by_model=model_rows,
         by_client=_ranked(by_client, "client"),
+        by_source=_ranked(by_source, "source"),
         top_model=top_model,
     )
+
+
+def merge_mcp_lifetime(
+    proxy_lifetime: dict[str, Any] | None,
+    report: SavingsReport | None = None,
+) -> dict[str, Any]:
+    """Merge durable MCP savings into proxy lifetime totals.
+
+    The ledger also records proxy events, so adding its whole lifetime bucket
+    would double-count current proxy traffic. Only ``source="mcp"`` rows are
+    added to the proxy tracker's totals.
+    """
+
+    merged = dict(proxy_lifetime or {})
+    report = report or aggregate_savings()
+    mcp = next((row for row in report.by_source if row.get("source") == "mcp"), None)
+    if not mcp:
+        return merged
+
+    mcp_tokens = int(mcp.get("tokens_saved", 0) or 0)
+    mcp_cost = float(mcp.get("cost_usd", 0.0) or 0.0)
+    mcp_calls = int(mcp.get("calls", 0) or 0)
+    prior_mcp_tokens = int(merged.get("mcp_tokens_saved", 0) or 0)
+    prior_mcp_cost = float(merged.get("mcp_compression_savings_usd", 0.0) or 0.0)
+    prior_mcp_calls = int(merged.get("mcp_calls", 0) or 0)
+    merged["tokens_saved"] = int(merged.get("tokens_saved", 0) or 0) - prior_mcp_tokens + mcp_tokens
+    merged["compression_savings_usd"] = round(
+        float(merged.get("compression_savings_usd", 0.0) or 0.0) - prior_mcp_cost + mcp_cost,
+        6,
+    )
+    merged["requests"] = int(merged.get("requests", 0) or 0) - prior_mcp_calls + mcp_calls
+    merged["mcp_tokens_saved"] = mcp_tokens
+    merged["mcp_compression_savings_usd"] = round(mcp_cost, 6)
+    merged["mcp_calls"] = mcp_calls
+    return merged
 
 
 def _maybe_compact(target: Path) -> None:
@@ -403,4 +445,5 @@ __all__ = [
     "estimate_cost_usd",
     "record_savings_event",
     "aggregate_savings",
+    "merge_mcp_lifetime",
 ]

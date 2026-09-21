@@ -83,6 +83,31 @@ def test_breakdowns_aggregate_by_dimension(monkeypatch, tmp_path):
     assert clients["proxy"]["tokens_saved"] == 1400
 
 
+def test_merge_mcp_lifetime_adds_only_mcp_ledger_events(monkeypatch, tmp_path):
+    _events_env(monkeypatch, tmp_path)
+    L.record_savings_event(
+        tokens_before=1000,
+        tokens_after=600,
+        source="proxy",
+        cost_usd=0.04,
+    )
+    L.record_savings_event(
+        tokens_before=500,
+        tokens_after=200,
+        source="mcp",
+        cost_usd=0.03,
+    )
+
+    merged = L.merge_mcp_lifetime(
+        {"tokens_saved": 400, "compression_savings_usd": 0.04, "requests": 1}
+    )
+
+    assert merged["tokens_saved"] == 700
+    assert merged["compression_savings_usd"] == pytest.approx(0.07)
+    assert merged["requests"] == 2
+    assert merged["mcp_tokens_saved"] == 300
+
+
 def test_windows_today_week_last30(monkeypatch, tmp_path):
     _events_env(monkeypatch, tmp_path)
     now = datetime(2026, 6, 17, 12, 0, tzinfo=UTC)
@@ -240,9 +265,10 @@ def test_mcp_record_savings_ignores_noop(monkeypatch, tmp_path):
     pytest.importorskip("mcp", reason="MCP SDK required")
     from headroom.ccr import mcp_server
 
-    _events_env(monkeypatch, tmp_path)
+    path = _events_env(monkeypatch, tmp_path)
     server = mcp_server.HeadroomMCPServer(check_proxy=False)
     server._record_savings({"original_tokens": 500, "compressed_tokens": 500})
+    assert not path.exists()
     assert L.aggregate_savings().lifetime["calls"] == 0
 
 

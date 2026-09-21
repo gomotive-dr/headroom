@@ -66,6 +66,7 @@ except ImportError:
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from headroom import savings_ledger
 from headroom._version import __version__
 from headroom.agent_savings import DEFAULT_PROFILE, proxy_pipeline_kwargs
 from headroom.cache.compression_feedback import get_compression_feedback
@@ -4431,6 +4432,9 @@ def create_app(config: ProxyConfig | None = None) -> FastAPI:
         cache_net_usd = prefix_cache_stats.get("totals", {}).get("net_savings_usd", 0.0)
         total_tokens_all_layers = all_layers_tokens_saved
         persistent_savings = m.savings_tracker.stats_preview()
+        persistent_savings["lifetime"] = savings_ledger.merge_mcp_lifetime(
+            persistent_savings.get("lifetime")
+        )
         display_session = persistent_savings.get("display_session", {})
         recent_request_logs = proxy.logger.get_recent(10_000) if proxy.logger else []
         recent_request_payload = _build_recent_request_payload()

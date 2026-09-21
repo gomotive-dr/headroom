@@ -23,11 +23,12 @@ from typing import Any
 
 import click
 
+from headroom import savings_ledger
 from headroom._version import format_version_label, normalize_release_version
 from headroom.install.health import probe_json
 from headroom.install.paths import claude_settings_path, codex_config_path
 from headroom.install.state import list_manifests
-from headroom.paths import savings_path
+from headroom.paths import savings_events_path, savings_path
 from headroom.providers.claude import (
     REMOTE_CONTROL_BASE_URL_ENV,
     REMOTE_CONTROL_SIBLING_GATE_NOTE,
@@ -532,7 +533,11 @@ def _classify_routing_url(name: str, url: str, port: int, *, source: str) -> Che
     return CheckResult(name=name, status=PASS, summary=f"routed via {source}")
 
 
-def check_savings(stats: dict[str, Any] | None, savings_file: Path) -> CheckResult:
+def check_savings(
+    stats: dict[str, Any] | None,
+    savings_file: Path,
+    savings_events_file: Path | None = None,
+) -> CheckResult:
     """Are savings actually flowing? Lifetime totals + last activity."""
     name = "savings"
     payload: dict[str, Any] | None = None
@@ -547,6 +552,20 @@ def check_savings(stats: dict[str, Any] | None, savings_file: Path) -> CheckResu
             return CheckResult(
                 name=name, status=WARN, summary=f"could not read savings file {savings_file}"
             )
+    # Doctor must include direct MCP-tool savings even when the HTTP proxy has
+    # never written proxy_savings.json. Use the sibling ledger by default so
+    # tests and relocated workspaces remain self-contained.
+    ledger_path = savings_events_file or savings_file.with_name("savings_events.jsonl")
+    ledger_report = savings_ledger.aggregate_savings(path=ledger_path)
+    proxy_lifetime = payload.get("lifetime") if payload is not None else None
+    lifetime = savings_ledger.merge_mcp_lifetime(proxy_lifetime, ledger_report)
+    if lifetime.get("mcp_calls", 0):
+        payload = dict(payload or {})
+        payload["lifetime"] = lifetime
+        source = (
+            f"{source} + {ledger_path}" if source != "proxy /stats" else "proxy /stats + MCP ledger"
+        )
+
     if payload is None:
         return CheckResult(
             name=name,
@@ -736,7 +755,7 @@ def doctor(port: int, emit_json: bool) -> None:
         check_wrap_marker_staleness(project_local_claude_settings),
         check_codex_routing(codex_config_path(), port),
         check_shell_env(os.environ, port),
-        check_savings(stats, savings_path()),
+        check_savings(stats, savings_path(), savings_events_path()),
         check_budget(stats),
     ]
     auth_conflict_check = check_claude_auth_conflict(

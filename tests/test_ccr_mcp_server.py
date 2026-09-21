@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +35,19 @@ def test_shared_stats_work_without_fcntl(monkeypatch, tmp_path) -> None:
 
     events = mcp_server._read_shared_events(window_seconds=60)
     assert events == [{"type": "compress", "timestamp": 1000.0, "pid": 4242}]
+
+
+def test_shared_stats_read_does_not_prune_durable_history(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(mcp_server, "_HAS_FCNTL", False)
+    monkeypatch.setattr(mcp_server, "SHARED_STATS_FILE", tmp_path / "session_stats.jsonl")
+    monkeypatch.setattr(mcp_server.time, "time", lambda: 1000.0)
+    original = '{"type":"compress","timestamp":800.0}\n{"type":"compress","timestamp":995.0}\n'
+    mcp_server.SHARED_STATS_FILE.write_text(original, encoding="utf-8")
+
+    events = mcp_server._read_shared_events(window_seconds=60)
+
+    assert events == [{"type": "compress", "timestamp": 995.0}]
+    assert mcp_server.SHARED_STATS_FILE.read_text(encoding="utf-8") == original
 
 
 # --- Shared compression store wiring ---------------------------------------
@@ -91,6 +106,34 @@ def test_compress_savings_percent_tracks_token_counts(fresh_store) -> None:
         assert result["savings_percent"] == 0.0  # not inverted to 100
     else:
         assert result["savings_percent"] > 0.0
+
+
+def test_single_tool_compress_disables_conversation_recent_guard(
+    monkeypatch,
+    fresh_store,
+) -> None:
+    """An isolated MCP tool result is not a four-message conversation tail."""
+    captured: dict[str, object] = {}
+
+    def fake_compress(messages, **kwargs):
+        captured["messages"] = messages
+        captured.update(kwargs)
+        return SimpleNamespace(
+            messages=[{"role": "tool", "content": "compressed"}],
+            tokens_before=100,
+            tokens_after=50,
+            transforms_applied=["code_aware"],
+        )
+
+    monkeypatch.setattr(importlib.import_module("headroom.compress"), "compress", fake_compress)
+    monkeypatch.setattr(mcp_server, "_append_shared_event", lambda event: None)
+    server = mcp_server.HeadroomMCPServer(check_proxy=False)
+
+    result = server._compress_content("package main\nfunc main() {}")
+
+    assert captured["messages"] == [{"role": "tool", "content": "package main\nfunc main() {}"}]
+    assert captured["protect_recent"] == 0
+    assert all("recent_code" not in transform for transform in result["transforms"])
 
 
 def test_mcp_compress_surfaces_unreachable_proxy(fresh_store) -> None:
@@ -320,8 +363,8 @@ def test_mcp_retrieve_missing_hash_still_errors(fresh_store) -> None:
     assert "do not retry the same hash" not in result.get("hint", "").lower()
 
 
-def test_handle_stats_session_output_is_window_scoped() -> None:
-    """window-scoped stats output should be explicitly labeled after this change."""
+def test_handle_stats_labels_mixed_scope_summary_coherently() -> None:
+    """The output mixes a proxy window, process stats, and durable lifetime."""
 
     async def fetch_stats() -> dict[str, object]:
         return {
@@ -337,8 +380,8 @@ def test_handle_stats_session_output_is_window_scoped() -> None:
     response = asyncio.run(server._handle_stats())
     text = response[0].kwargs["text"]
 
-    assert "Headroom Window-Scoped Session Summary" in text
-    assert "Headroom Session Summary" not in text
+    assert "Headroom Stats Summary" in text
+    assert "Window-Scoped" not in text
 
 
 def test_handle_stats_includes_lifetime_totals_from_persistent_savings() -> None:
@@ -384,7 +427,7 @@ def test_handle_stats_falls_back_gracefully_without_persistent_lifetime() -> Non
     response = asyncio.run(server._handle_stats())
     text = response[0].kwargs["text"]
 
-    assert "Headroom Window-Scoped Session Summary" in text
+    assert "Headroom Stats Summary" in text
     assert "Lifetime Savings:" not in text
 
 

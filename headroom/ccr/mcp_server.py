@@ -103,7 +103,7 @@ def _format_session_summary(
 ) -> str:
     """Format the proxy summary + local MCP stats into clean readable text."""
     lines: list[str] = []
-    lines.append("Headroom Window-Scoped Session Summary")
+    lines.append("Headroom Stats Summary")
     lines.append("=" * 40)
 
     mode = summary.get("mode", "token")
@@ -168,7 +168,10 @@ def _format_session_summary(
     local_compressions = local_stats.get("compressions", 0)
     local_saved = local_stats.get("total_tokens_saved", 0)
     if local_compressions > 0:
-        lines.append(f"MCP Tool: {local_compressions} compressions, {local_saved:,} tokens saved")
+        lines.append(
+            f"MCP Tool (process lifetime): {local_compressions} compressions, "
+            f"{local_saved:,} tokens saved"
+        )
         lines.append("")
 
     # Lifetime proxy savings (cross-session)
@@ -202,7 +205,7 @@ MCP_SESSION_TTL = 3600
 # Respects HEADROOM_WORKSPACE_DIR.
 SHARED_STATS_DIR = _paths.workspace_dir()
 SHARED_STATS_FILE = _paths.session_stats_path()
-SESSION_WINDOW_SECONDS = 7200  # 2 hours — events older than this are pruned
+SESSION_WINDOW_SECONDS = 7200  # 2 hours — older events are ignored, not deleted
 
 
 def _append_shared_event(event: dict[str, Any]) -> None:
@@ -222,12 +225,11 @@ def _append_shared_event(event: dict[str, Any]) -> None:
 
 
 def _read_shared_events(window_seconds: int = SESSION_WINDOW_SECONDS) -> list[dict[str, Any]]:
-    """Read shared events within the session time window, pruning old entries."""
+    """Read shared events within the session window without mutating history."""
     if not SHARED_STATS_FILE.exists():
         return []
     cutoff = time.time() - window_seconds
     events: list[dict[str, Any]] = []
-    keep_lines: list[str] = []
     try:
         with open(SHARED_STATS_FILE) as f:
             if _HAS_FCNTL:
@@ -243,20 +245,8 @@ def _read_shared_events(window_seconds: int = SESSION_WINDOW_SECONDS) -> list[di
                 evt = json.loads(line)
                 if evt.get("timestamp", 0) >= cutoff:
                     events.append(evt)
-                    keep_lines.append(line + "\n")
             except json.JSONDecodeError:
                 continue
-        # Prune old entries (only if we dropped some)
-        if len(keep_lines) < len(lines):
-            try:
-                with open(SHARED_STATS_FILE, "w") as f:
-                    if _HAS_FCNTL:
-                        fcntl.flock(f, fcntl.LOCK_EX)
-                    f.writelines(keep_lines)
-                    if _HAS_FCNTL:
-                        fcntl.flock(f, fcntl.LOCK_UN)
-            except Exception:
-                pass
     except Exception:
         pass
     return events
@@ -411,7 +401,15 @@ class HeadroomMCPServer:
         # Wrap content as a tool message (most common compression target)
         messages = [{"role": "tool", "content": content}]
 
-        result = compress(messages, model="claude-sonnet-4-5-20250929")
+        # MCP receives one isolated tool payload, not a conversation tail. The
+        # normal four-message code guard would therefore protect every code-like
+        # payload solely because it is "recent" and make this tool a no-op.
+        # Lossless/config routers still run first; code fallback may be lossy.
+        result = compress(
+            messages,
+            model="claude-sonnet-4-5-20250929",
+            protect_recent=0,
+        )
 
         compressed_content = result.messages[0].get("content", content)
         input_tokens = result.tokens_before

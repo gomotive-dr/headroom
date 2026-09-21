@@ -651,6 +651,24 @@ class TestSavings:
         stats = {"persistent_savings": {"lifetime": {"tokens_saved": 0}}}
         assert check_savings(stats, tmp_path / "missing.json").status == WARN
 
+    def test_mcp_ledger_savings_pass_without_proxy_history(self, tmp_path):
+        from headroom import savings_ledger
+
+        ledger = tmp_path / "savings_events.jsonl"
+        savings_ledger.record_savings_event(
+            tokens_before=1000,
+            tokens_after=250,
+            source="mcp",
+            cost_usd=0.25,
+            path=ledger,
+        )
+
+        result = check_savings(None, tmp_path / "proxy_savings.json", ledger)
+
+        assert result.status == PASS
+        assert "750" in result.summary
+        assert "$0.25" in result.summary
+
 
 class TestBudget:
     def test_proxy_down_skips(self):
