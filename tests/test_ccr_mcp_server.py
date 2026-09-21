@@ -535,3 +535,71 @@ def test_run_stdio_reaps_process_on_parent_death(monkeypatch) -> None:
 
     assert excinfo.value.args[0] == 0
     assert cleaned["done"] is True
+
+
+# --- Kompress warmup at MCP startup ------------------------------------------
+# Readiness is process-local. Cold MCP skipped code/HCL with "Kompress model
+# not ready". create_ccr_mcp_server() blocks on warm_kompress_model so the
+# first headroom_compress can run. These tests mock the loader (no HF/ONNX).
+
+
+def _patch_kompress_warmup(monkeypatch, *, warm, available: bool = True) -> list:
+    calls: list[dict[str, object]] = []
+
+    def fake_warm(*args, **kwargs):
+        calls.append({"args": args, "kwargs": kwargs})
+        return warm(*args, **kwargs) if callable(warm) else warm
+
+    monkeypatch.setattr(
+        "headroom.transforms.kompress_compressor.is_kompress_available",
+        lambda: available,
+    )
+    monkeypatch.setattr(
+        "headroom.transforms.kompress_compressor.ensure_background_download",
+        lambda *a, **k: None,
+    )
+    monkeypatch.setattr(
+        "headroom.transforms.kompress_compressor.warm_kompress_model",
+        fake_warm,
+    )
+    monkeypatch.setattr(
+        "headroom.transforms.kompress_compressor._kompress_cache",
+        {"chopratejas/kompress-v2-base": (object(), object(), "onnx")},
+    )
+    return calls
+
+
+def test_create_ccr_mcp_server_warms_kompress_model(monkeypatch) -> None:
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.delenv("HEADROOM_KOMPRESS_WARMUP", raising=False)
+    calls = _patch_kompress_warmup(monkeypatch, warm=True)
+
+    mcp_server.create_ccr_mcp_server(proxy_url="http://127.0.0.1:9")
+
+    assert len(calls) == 1
+    assert calls[0]["kwargs"].get("allow_download") is True
+
+
+def test_mcp_kompress_warmup_skipped_under_pytest(monkeypatch) -> None:
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_ccr_mcp_server.py::x")
+    monkeypatch.delenv("HEADROOM_KOMPRESS_WARMUP", raising=False)
+    calls = _patch_kompress_warmup(monkeypatch, warm=True)
+
+    mcp_server.create_ccr_mcp_server(proxy_url="http://127.0.0.1:9")
+
+    assert calls == []
+
+
+def test_mcp_kompress_warmup_timeout_fail_open(monkeypatch) -> None:
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    monkeypatch.setenv("HEADROOM_KOMPRESS_WARMUP", "1")
+
+    def never_returns(*_args, **_kwargs) -> bool:
+        import time as _time
+
+        _time.sleep(30)
+        return True
+
+    _patch_kompress_warmup(monkeypatch, warm=never_returns)
+
+    assert mcp_server.warm_kompress_on_mcp_start(timeout_seconds=0.05) is False

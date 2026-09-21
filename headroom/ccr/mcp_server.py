@@ -28,6 +28,7 @@ import contextlib
 import json
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -94,6 +95,11 @@ DEFAULT_PROXY_URL = os.environ.get("HEADROOM_PROXY_URL", "http://127.0.0.1:8787"
 # blocking stdin-reader thread wedges server.run() forever, orphaning this
 # process under init/launchd. The watchdog reaps us once we are reparented.
 PARENT_DEATH_POLL_INTERVAL = 5.0
+
+# Blocking Kompress load at MCP start. Cache-hit ONNX CPU is ~2.4s; give the
+# tokenizer/session a little headroom so the first headroom_compress is not
+# skipped with "Kompress model not ready". Fail-open if this deadline is hit.
+MCP_KOMPRESS_WARMUP_TIMEOUT_SECONDS = 8.0
 
 
 def _format_session_summary(
@@ -1141,6 +1147,121 @@ class HeadroomMCPServer:
             await self._http_client.aclose()
 
 
+def _mcp_kompress_warmup_disabled() -> bool:
+    """True when operators or pytest should skip the blocking MCP warmup."""
+    raw = os.environ.get("HEADROOM_KOMPRESS_WARMUP", "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return True
+    if raw in ("1", "true", "yes", "on"):
+        return False
+    # Hundreds of unit tests construct an MCP server; none of them should load
+    # ONNX. Production `mcp serve` has no PYTEST_CURRENT_TEST.
+    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+def _mcp_kompress_warmup_timeout_seconds() -> float:
+    raw = os.environ.get("HEADROOM_MCP_KOMPRESS_WARMUP_TIMEOUT_SECONDS", "").strip()
+    if not raw:
+        return MCP_KOMPRESS_WARMUP_TIMEOUT_SECONDS
+    try:
+        return max(0.1, float(raw))
+    except ValueError:
+        return MCP_KOMPRESS_WARMUP_TIMEOUT_SECONDS
+
+
+def warm_kompress_on_mcp_start(
+    *,
+    timeout_seconds: float | None = None,
+    allow_download: bool = True,
+) -> bool:
+    """Load Kompress before MCP tools are served so the first compress can run.
+
+    Readiness is process-local (``InferenceSession`` in ``_kompress_cache``).
+    The proxy's fire-and-forget warmup is too late for stdio MCP: cold
+    ``headroom_compress`` calls skip with "Kompress model not ready".
+
+    Blocks up to ``timeout_seconds`` (cache load is ~2.4s on ONNX CPU). If the
+    deadline hits, background load continues and MCP still serves (fail-open).
+    """
+    if _mcp_kompress_warmup_disabled():
+        return False
+
+    timeout = (
+        _mcp_kompress_warmup_timeout_seconds()
+        if timeout_seconds is None
+        else max(0.1, float(timeout_seconds))
+    )
+
+    try:
+        from headroom.transforms.kompress_compressor import (
+            HF_MODEL_ID,
+            _kompress_cache,
+            ensure_background_download,
+            is_kompress_available,
+            warm_kompress_model,
+        )
+    except Exception as exc:  # pragma: no cover - import surface
+        logger.warning("Kompress MCP warmup skipped (import failed): %s", exc)
+        return False
+
+    if not is_kompress_available():
+        logger.warning("Kompress MCP warmup skipped; Kompress is not available")
+        return False
+
+    # Start the load immediately so a wait-timeout still finishes in-process.
+    try:
+        ensure_background_download()
+    except Exception as exc:
+        logger.debug("Kompress MCP background load kickoff failed: %s", exc)
+
+    started = time.perf_counter()
+    result: dict[str, Any] = {"ok": False, "error": None}
+
+    def _warm() -> None:
+        try:
+            result["ok"] = bool(warm_kompress_model(allow_download=allow_download))
+        except Exception as exc:  # fail-open
+            result["error"] = exc
+            result["ok"] = False
+
+    thread = threading.Thread(target=_warm, name="kompress-mcp-warmup", daemon=True)
+    thread.start()
+    thread.join(timeout)
+    elapsed = time.perf_counter() - started
+
+    if thread.is_alive():
+        # WARNING so it is visible: `mcp serve` configures root logging at WARNING.
+        logger.warning(
+            "Kompress MCP warmup timed out after %.2fs; serving tools fail-open",
+            elapsed,
+        )
+        return False
+
+    if result["error"] is not None:
+        logger.warning(
+            "Kompress MCP warmup failed after %.2fs: %s; serving tools fail-open",
+            elapsed,
+            result["error"],
+        )
+        return False
+
+    if not result["ok"]:
+        logger.warning(
+            "Kompress MCP warmup did not load the model (%.2fs); serving tools fail-open",
+            elapsed,
+        )
+        return False
+
+    entry = _kompress_cache.get(HF_MODEL_ID)
+    backend = entry[2] if entry is not None else "unknown"
+    logger.warning(
+        "Kompress MCP warmup ready backend=%s elapsed=%.2fs",
+        backend,
+        elapsed,
+    )
+    return True
+
+
 def create_ccr_mcp_server(
     proxy_url: str = DEFAULT_PROXY_URL,
     direct_mode: bool = False,
@@ -1154,6 +1275,7 @@ def create_ccr_mcp_server(
     Returns:
         HeadroomMCPServer instance.
     """
+    warm_kompress_on_mcp_start()
     return HeadroomMCPServer(proxy_url=proxy_url)
 
 
@@ -1185,6 +1307,7 @@ async def main() -> None:
     else:
         logging.basicConfig(level=logging.WARNING)
 
+    warm_kompress_on_mcp_start()
     server = HeadroomMCPServer(proxy_url=args.proxy_url)
 
     try:
